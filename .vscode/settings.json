@@ -1,0 +1,4 @@
+{
+    "git.openRepositoryInParentFolders": "never",
+    "python.defaultInterpreterPath": "zionMusic/bin/python"
+}
