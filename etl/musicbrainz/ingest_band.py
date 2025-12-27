@@ -1,4 +1,4 @@
-import os, uuid, requests
+import os, uuid, requests, time, urllib3
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
@@ -23,10 +23,33 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-def mb_get(path, params):
-    r = requests.get(f"{MB}/{path}", params=params, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json()
+# Check for MusicBrainz authentication token (optional, for higher rate limits)
+MB_TOKEN = os.environ.get("MUSICBRAINZ_TOKEN")
+if MB_TOKEN:
+    HEADERS["Authorization"] = f"Bearer {MB_TOKEN}"
+
+def mb_get(path, params, retry_count=0, context="general"):
+    """Get data from MusicBrainz API with rate limiting and retry logic."""
+    try:
+        # Rate limiting: standard for band processing
+        rate_limit = 0.15 if MB_TOKEN else 1.1  # 10 req/sec vs 1 req/sec
+        if hasattr(mb_get, '_last_call'):
+            elapsed = time.time() - mb_get._last_call
+            if elapsed < rate_limit:
+                time.sleep(rate_limit - elapsed)
+        mb_get._last_call = time.time()
+
+        r = requests.get(f"{MB}/{path}", params=params, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, urllib3.exceptions.ProtocolError) as e:
+        if retry_count < 3:
+            print(f"      ⚠️ Connection error, retrying in {2 ** retry_count}s... ({retry_count + 1}/3)")
+            time.sleep(2 ** retry_count)  # Exponential backoff
+            return mb_get(path, params, retry_count + 1)
+        else:
+            print(f"      ❌ Failed after 3 retries: {e}")
+            raise e
 
 def upsert_person(session, mbid: str, name: str):
     session.run("""
@@ -59,13 +82,89 @@ def main(group_mbid: str):
     group_name = data.get("name") or group_mbid
 
     # Check for Israeli nationality/area
-    area = data.get("area", {})
+    area = data.get("area") or {}
     country = data.get("country", "")
     area_name = area.get("name", "")
-    is_israeli = (country == "IL") or ("Israel" in area_name)
-    
-    if not is_israeli:
-        print(f"⚠️ Skipping non-Israeli band: {group_name} ({country}/{area_name})")
+
+    # Build full begin_area string like the webpage shows
+    begin_area = data.get("begin-area")
+    begin_area_full = ""
+    if begin_area:
+        begin_area_name = begin_area.get("name", "")
+        begin_area_id = begin_area.get("id")
+
+        if begin_area_id:
+            try:
+                # Collect area hierarchy
+                areas = []
+                visited = set()
+
+                def collect_area_hierarchy(area_id, depth=0):
+                    if area_id in visited or depth > 5:
+                        return
+                    visited.add(area_id)
+
+                    area_data = mb_get(f"area/{area_id}", {"inc": "area-rels", "fmt": "json"})
+                    current_name = area_data.get("name", "")
+                    areas.insert(0, current_name)
+
+                    # Only continue if we haven't found Israel yet
+                    if "Israel" not in areas:
+                        # Find parent areas
+                        relations = area_data.get("relations", [])
+                        for rel in relations:
+                            if rel.get("type") == "part of":
+                                parent_area = rel.get("area", {})
+                                parent_name = parent_area.get("name", "")
+                                if parent_name == "Israel":
+                                    # Found Israel, add it and stop
+                                    areas.insert(0, parent_name)
+                                    return
+                                elif parent_name and parent_name not in areas:
+                                    parent_id = parent_area.get("id")
+                                    if parent_id:
+                                        collect_area_hierarchy(parent_id, depth + 1)
+                                        return  # Stop after following one path
+
+                collect_area_hierarchy(begin_area_id)
+
+                # Format like webpage: "Tel Aviv, Tel-Aviv, Israel"
+                if areas:
+                    # Reverse to put most specific first
+                    areas.reverse()
+                    if len(areas) > 1:
+                        begin_area_full = ", ".join(areas)
+                    else:
+                        begin_area_full = areas[0]
+                else:
+                    begin_area_full = begin_area_name
+
+            except Exception:
+                begin_area_full = begin_area_name
+        else:
+            begin_area_full = begin_area_name
+
+    # Check if begin-area is related to Israel
+    begin_area_is_israeli = "Israel" in begin_area_full
+
+    # Additional check: known Israeli cities
+    if not begin_area_is_israeli and begin_area:
+        begin_area_name = begin_area.get("name", "")
+        known_israeli_cities = [
+            "tel aviv", "jerusalem", "haifa", "beersheba", "rishon lezion",
+            "petah tikva", "ashdod", "netanya", "holon", "bat yam", "ramat gan",
+            "rehovot", "kiryat ono", "herzliya", "jaffa", "nahariya", "hadera",
+            "modiin", "lod", "ramla", "nazareth", "tiberias", "safed", "eilat",
+            "karmiel", "yavne", "raanana", "kfar saba", "hod hasharon"
+        ]
+        if begin_area_name.lower() in known_israeli_cities:
+            begin_area_is_israeli = True
+
+    is_explicitly_israeli = (country == "IL") or ("Israel" in area_name) or begin_area_is_israeli
+    is_explicitly_foreign = bool(country) and country != "IL" and ("Israel" not in area_name) and not begin_area_is_israeli
+
+    if is_explicitly_foreign:
+        print(f"⚠️ Skipping explicitly non-Israeli band: {group_name} ({country}/{area_name}/{begin_area_full})")
         return
 
     with driver.session() as s:

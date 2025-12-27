@@ -190,3 +190,177 @@ def get_communities(bucket: str):
         "meta": metadata,
         "communities": rows
     }
+
+@app.get("/graph/search")
+def graph_search(q: str = Query(..., min_length=1), radius: int = Query(3, ge=1, le=20), limitNodes: int = Query(250, ge=1), limitEdges: int = Query(600, ge=1)):
+    """
+    Search for an artist and return their connected neighborhood graph.
+    """
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    with driver.session() as s:
+        # Step 1: Find the root node (Person or Group)
+        root_node = find_root_node(s, q)
+        if not root_node:
+            raise HTTPException(status_code=404, detail=f"No matching artist found for: {q}")
+
+        root_id = root_node["id"]
+
+        # Step 2: Fetch neighborhood up to radius with limits
+        nodes, edges = fetch_neighborhood(s, root_id, radius, limitNodes, limitEdges)
+
+        return {
+            "rootId": root_id,
+            "nodes": list(nodes.values()),
+            "edges": edges
+        }
+
+def find_root_node(session, search_term: str) -> Optional[Dict[str, Any]]:
+    """Find the best matching Person or Group node."""
+    # First try exact match (case-insensitive)
+    exact_query = """
+    MATCH (n:Person) WHERE toLower(n.name) = toLower($search_term) RETURN n, 'Person' as label
+    UNION
+    MATCH (n:Group) WHERE toLower(n.name) = toLower($search_term) RETURN n, 'Group' as label
+    LIMIT 1
+    """
+
+    result = session.run(exact_query, search_term=search_term).single()
+    if result:
+        node = result["n"]
+        return {"node": node, "label": result["label"], "id": generate_node_id(node, result["label"])}
+
+    # Fallback to contains match
+    contains_query = """
+    MATCH (n:Person) WHERE toLower(n.name) CONTAINS toLower($search_term) RETURN n, 'Person' as label
+    UNION
+    MATCH (n:Group) WHERE toLower(n.name) CONTAINS toLower($search_term) RETURN n, 'Group' as label
+    ORDER BY size(n.name)  # Prefer shorter names (likely more relevant)
+    LIMIT 1
+    """
+
+    result = session.run(contains_query, search_term=search_term).single()
+    if result:
+        node = result["n"]
+        return {"node": node, "label": result["label"], "id": generate_node_id(node, result["label"])}
+
+    return None
+
+def fetch_neighborhood(session, root_id: str, radius: int, max_nodes: int, max_edges: int):
+    """Fetch connected neighborhood up to radius with safety limits."""
+    # Find the root node by our generated ID
+    root_query = """
+    MATCH (n)
+    WHERE (n:Person AND n.personId = $root_id) OR
+          (n:Group AND n.groupId = $root_id) OR
+          (n.mbid = $root_id) OR
+          (elementId(n) = $root_id)
+    RETURN n
+    LIMIT 1
+    """
+
+    root_result = session.run(root_query, root_id=root_id).single()
+    if not root_result:
+        return {}, []
+
+    root_node = root_result["n"]
+
+    # Use variable-length path expansion with limits
+    paths_query = f"""
+    MATCH path = (root)-[*1..{radius}]-(neighbor)
+    WHERE elementId(root) = $root_element_id
+    RETURN path
+    LIMIT {max_edges * 2}  // Get more paths than edges to ensure coverage
+    """
+
+    paths_result = session.run(paths_query, root_element_id=root_node.element_id)
+
+    nodes = {}
+    edges = []
+    edge_count = 0
+
+    # Process paths and collect nodes/edges
+    for record in paths_result:
+        path = record["path"]
+
+        # Extract nodes from path
+        for node in path.nodes:
+            node_id = generate_node_id(node, list(node.labels)[0] if node.labels else "Other")
+
+            if node_id not in nodes and len(nodes) < max_nodes:
+                nodes[node_id] = {
+                    "id": node_id,
+                    "label": list(node.labels)[0] if node.labels else "Other",
+                    "name": dict(node).get("name", node_id),
+                    "props": get_minimal_props(node)
+                }
+
+        # Extract relationships from path
+        for rel in path.relationships:
+            if edge_count >= max_edges:
+                break
+
+            source_id = generate_node_id(rel.start_node, list(rel.start_node.labels)[0] if rel.start_node.labels else "Other")
+            target_id = generate_node_id(rel.end_node, list(rel.end_node.labels)[0] if rel.end_node.labels else "Other")
+
+            edge_id = generate_edge_id(source_id, rel.type, target_id, dict(rel))
+
+            if not any(e["id"] == edge_id for e in edges):
+                edges.append({
+                    "id": edge_id,
+                    "source": source_id,
+                    "target": target_id,
+                    "type": rel.type,
+                    "props": get_minimal_edge_props(rel)
+                })
+                edge_count += 1
+
+    return nodes, edges
+
+def generate_node_id(node, label: str) -> str:
+    """Generate stable node ID with priority: personId/groupId > mbid > elementId."""
+    props = dict(node)
+
+    if label == "Person" and "personId" in props:
+        return props["personId"]
+    elif label == "Group" and "groupId" in props:
+        return props["groupId"]
+    elif "mbid" in props:
+        return props["mbid"]
+    else:
+        return node.element_id
+
+def generate_edge_id(source: str, rel_type: str, target: str, props: Dict[str, Any]) -> str:
+    """Generate stable edge ID: source|type|target|startDate|endDate."""
+    start_date = props.get("startDate", "") or ""
+    end_date = props.get("endDate", "") or ""
+    return f"{source}|{rel_type}|{target}|{start_date}|{end_date}"
+
+def get_minimal_props(node) -> Dict[str, Any]:
+    """Extract minimal properties for nodes."""
+    props = dict(node)
+    result = {}
+
+    # Always include name if present
+    if "name" in props:
+        result["name"] = props["name"]
+
+    # Include IDs
+    for key in ["mbid", "personId", "groupId"]:
+        if key in props:
+            result[key] = props[key]
+
+    return result
+
+def get_minimal_edge_props(rel) -> Dict[str, Any]:
+    """Extract minimal properties for edges."""
+    props = dict(rel)
+    result = {}
+
+    # Include dates and role if present
+    for key in ["startDate", "endDate", "role"]:
+        if key in props:
+            result[key] = props[key]
+
+    return result

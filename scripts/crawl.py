@@ -63,9 +63,21 @@ def retry_with_backoff(func, *args, max_retries=3, delay=5):
                     continue
             raise e
 
+# Circuit breaker for crawl script
+crawl_failures = 0
+max_crawl_failures = 3
+crawl_permanently_disabled = False
+
 def main():
     print("🕷️ Starting ZionMusic Crawler...")
-    
+
+    global crawl_failures, crawl_permanently_disabled
+
+    if crawl_permanently_disabled:
+        print("🚫 Crawl permanently disabled due to excessive API failures.")
+        print("💡 Run: python scripts/crawl.py --reset-crawl")
+        return
+
     # Run loop
     while True:
         with driver.session() as s:
@@ -86,7 +98,8 @@ def main():
         eid = target['id']
         
         print(f"\n🔍 Processing {labels[0]} '{name}' (MBID: {mbid}, Discogs: {discogs_id})...")
-        
+
+        consecutive_errors = 0
         try:
             # 1. Try MusicBrainz first (Primary Source)
             if mbid:
@@ -111,15 +124,43 @@ def main():
                 
                 try:
                     search_res = retry_with_backoff(mb_get, "artist", {"query": f'artist:"{name}"', "fmt": "json"})
-                    candidates = search_res.get("artists", [])
-                    print(f"      found {len(candidates)} candidates. Top 3: {[c['name'] for c in candidates[:3]]}")
+                    if not search_res:
+                        print(f"      ❌ Search returned None for '{name}'")
+                        candidates = []
+                    else:
+                        candidates = search_res.get("artists", [])
+                        print(f"      found {len(candidates)} candidates. Top 3: {[c['name'] for c in candidates[:3]]}")
                     
                     best = None
                     for c in candidates:
                         # Prioritize Israeli matches if possible
                         c_country = c.get("country", "")
-                        c_area = c.get("area", {}).get("name", "")
-                        is_israeli = c_country == "IL" or "Israel" in c_area
+                        c_area = (c.get("area") or {}).get("name", "")
+                        c_begin_area_obj = c.get("begin-area")
+
+                        # Check if begin-area is related to Israel
+                        c_begin_area_is_israeli = False
+                        if c_begin_area_obj:
+                            c_begin_area_name = c_begin_area_obj.get("name", "")
+                            c_begin_area_id = c_begin_area_obj.get("id")
+
+                            # Direct check: "Israel" in name
+                            if "Israel" in c_begin_area_name:
+                                c_begin_area_is_israeli = True
+                            # Check if begin-area has relations to Israel (simplified for search)
+                            elif c_begin_area_id:
+                                # For search results, we'll do a simplified check - if it's a known Israeli city
+                                known_israeli_cities = [
+                                    "tel aviv", "jerusalem", "haifa", "beersheba", "rishon lezion",
+                                    "petah tikva", "ashdod", "netanya", "holon", "bat yam", "ramat gan",
+                                    "rehovot", "kiryat ono", "herzliya", "jaffa", "nahariya", "hadera",
+                                    "modiin", "lod", "ramla", "nazareth", "tiberias", "safed", "eilat",
+                                    "karmiel", "yavne", "raanana", "kfar saba", "hod hasharon"
+                                ]
+                                if any(city in c_begin_area_name.lower() for city in known_israeli_cities):
+                                    c_begin_area_is_israeli = True
+
+                        is_israeli = (c_country == "IL") or ("Israel" in c_area) or c_begin_area_is_israeli
                         
                         # Check name match OR alias match OR sort-name match
                         c_name = c.get("name", "")
@@ -190,15 +231,39 @@ def main():
             with driver.session() as s:
                 mark_crawled(s, eid)
                 
-            # Respect API limits
-            print("   💤 Sleeping 1.5s...")
-            time.sleep(1.5)
-            
+            # Reset error counters on success
+            consecutive_errors = 0
+            if crawl_failures > 0:
+                crawl_failures = max(0, crawl_failures - 1)  # Gradually reduce
+
+            # Respect API limits - longer delay between artists
+            print("   💤 Sleeping 3s...")
+            time.sleep(3.0)
+
         except Exception as e:
             print(f"   ❌ Error crawling {name}: {e}")
+            consecutive_errors += 1
+            crawl_failures += 1
+
             with driver.session() as s:
                  s.run("MATCH (n) WHERE elementId(n) = $eid SET n.crawled = true, n.crawlError = $err", eid=eid, err=str(e))
-            time.sleep(2.0)
+
+            if consecutive_errors >= 2:
+                print(f"   🚫 Too many consecutive errors ({consecutive_errors}). Stopping crawl.")
+                if crawl_failures >= max_crawl_failures:
+                    crawl_permanently_disabled = True
+                    print("   🚫 Crawl permanently disabled due to excessive failures.")
+                return
+
+            time.sleep(5.0)  # Longer delay after errors
 
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--reset-crawl":
+        print("🔄 Resetting crawl circuit breaker")
+        crawl_failures = 0
+        crawl_permanently_disabled = False
+        print("✅ Crawl circuit breaker reset")
+        sys.exit(0)
+
     main()

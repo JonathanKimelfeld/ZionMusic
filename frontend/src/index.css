@@ -1,0 +1,164 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 450px;
+  padding: 20px;
+  background-color: #f5f5f5;
+  border-right: 1px solid #ddd;
+  overflow-y: auto;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.controls {
+  padding: 20px;
+  background-color: #fff;
+  border-bottom: 1px solid #ddd;
+  display: flex;
+  gap: 15px;
+  align-items: center;
+}
+
+#cy {
+  flex: 1;
+  width: 100%;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 200px;
+  font-size: 18px;
+  color: #666;
+}
+
+.error {
+  color: #d32f2f;
+  background-color: #ffebee;
+  padding: 10px;
+  border-radius: 4px;
+  margin: 10px 0;
+}
+
+.node-details {
+  background-color: #fff;
+  padding: 15px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.node-details h3 {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+.property {
+  margin-bottom: 8px;
+}
+
+.property strong {
+  display: inline-block;
+  width: 80px;
+}
+
+input, select, button {
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+input:focus, select:focus {
+  outline: none;
+  border-color: #2196f3;
+}
+
+button {
+  background-color: #2196f3;
+  color: white;
+  border: none;
+  cursor: pointer;
+  padding: 8px 16px;
+}
+
+button:hover {
+  background-color: #1976d2;
+}
+
+button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+/* New Filters Panel Styles */
+.filters-panel {
+  padding: 15px 20px;
+  background-color: #eee;
+  border-bottom: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.filter-group label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+}
+
+.radius-slider {
+  width: 100%;
+  cursor: pointer;
+}
+
+.checkbox-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: normal !important;
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox-container input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.filter-status {
+  margin-top: 5px;
+  padding-top: 8px;
+  border-top: 1px dotted #ccc;
+  color: #777;
+}
+
+.filter-status small {
+  font-weight: 500;
+}

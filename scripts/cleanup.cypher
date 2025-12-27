@@ -1,0 +1,2 @@
+MATCH (n:Release) DETACH DELETE n;
+MATCH (n)-[r:CONTRIBUTED_TO]->() DELETE r;
